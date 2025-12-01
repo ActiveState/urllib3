@@ -1,6 +1,14 @@
 Changes
 =======
 
+1.26.20.1 (2025-12-01)
+----------------------
+
+* - Fixed a security issue where restricting the maximum number of followed
+  redirects at the ``urllib3.PoolManager`` level via the ``retries`` parameter
+  did not work.
+
+
 1.26.20 (2024-08-29)
 --------------------
 

@@ -1,12 +1,9 @@
 Changes
 =======
 
-1.26.20.1 (2025-12-01)
+1.26.20.2 (Unreleased)
 ----------------------
 
-* - Fixed a security issue where restricting the maximum number of followed
-  redirects at the ``urllib3.PoolManager`` level via the ``retries`` parameter
-  did not work.
 * - Fixed a security issue where ``MultiDecoder`` would construct an unbounded
   number of decoders from the ``Content-Encoding`` header, enabling a
   resource-exhaustion attack. The chain is now capped at
@@ -17,6 +14,19 @@ Changes
   redirects followed from the low-level ``HTTPConnectionPool.urlopen``,
   including pools obtained via ``ProxyManager.connection_from_url``.
   (CVE-2026-44431, GHSA-qccp-gfcp-xxvc)
+
+Note: the installed package version remains ``1.26.20.1``; the
+``1.26.20.2`` label tracks only this documentation/changelog rollup
+to avoid four-segment PEP 440 version-comparison pitfalls in
+downstream tooling.
+
+
+1.26.20.1 (2025-12-01)
+----------------------
+
+* - Fixed a security issue where restricting the maximum number of followed
+  redirects at the ``urllib3.PoolManager`` level via the ``retries`` parameter
+  did not work.
 
 
 1.26.20 (2024-08-29)

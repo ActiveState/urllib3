@@ -12,6 +12,11 @@ Changes
   resource-exhaustion attack. The chain is now capped at
   ``MultiDecoder.max_decode_links`` (5). (CVE-2025-66418,
   GHSA-gm62-xv2j-4w53)
+* - Fixed a security issue where sensitive headers listed in
+  ``Retry.remove_headers_on_redirect`` were not stripped on cross-origin
+  redirects followed from the low-level ``HTTPConnectionPool.urlopen``,
+  including pools obtained via ``ProxyManager.connection_from_url``.
+  (CVE-2026-44431, GHSA-qccp-gfcp-xxvc)
 
 
 1.26.20 (2024-08-29)

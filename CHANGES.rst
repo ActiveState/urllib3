@@ -7,6 +7,11 @@ Changes
 * - Fixed a security issue where restricting the maximum number of followed
   redirects at the ``urllib3.PoolManager`` level via the ``retries`` parameter
   did not work.
+* - Fixed a security issue where ``MultiDecoder`` would construct an unbounded
+  number of decoders from the ``Content-Encoding`` header, enabling a
+  resource-exhaustion attack. The chain is now capped at
+  ``MultiDecoder.max_decode_links`` (5). (CVE-2025-66418,
+  GHSA-gm62-xv2j-4w53)
 
 
 1.26.20 (2024-08-29)

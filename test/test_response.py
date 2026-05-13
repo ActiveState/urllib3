@@ -281,6 +281,14 @@ class TestResponse(object):
 
         assert r.data == b"foo"
 
+    def test_multi_decoding_limits_chain_length(self):
+        # CVE-2025-66418: refuse to construct a decoder chain longer
+        # than MultiDecoder.max_decode_links.
+        encodings = ", ".join(["gzip"] * 6)
+        fp = BytesIO(b"")
+        with pytest.raises(DecodeError):
+            HTTPResponse(fp, headers={"content-encoding": encodings})
+
     def test_multi_decoding_gzip_gzip(self):
         compress = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
         data = compress.compress(b"foo")

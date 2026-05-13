@@ -86,24 +86,26 @@ class TestPoolManager(HTTPDummyServerTestCase):
         "retries",
         (0, Retry(total=0), Retry(redirect=0), Retry(total=0, redirect=0)),
     )
-    def test_redirects_disabled_for_pool_manager_with_0(
-        self, retries: typing.Literal[0] | Retry
-    ) -> None:
+    def test_redirects_disabled_for_pool_manager_with_0(self, retries):
         """
         Check handling redirects when retries is set to 0 on the pool
         manager.
         """
         with PoolManager(retries=retries) as http:
             with pytest.raises(MaxRetryError):
-                http.request("GET", f"{self.base_url}/redirect")
+                http.request("GET", "%s/redirect" % self.base_url)
 
             # Setting redirect=True should not change the behavior.
             with pytest.raises(MaxRetryError):
-                http.request("GET", f"{self.base_url}/redirect", redirect=True)
+                http.request(
+                    "GET", "%s/redirect" % self.base_url, redirect=True
+                )
 
             # Setting redirect=False should not make it follow the redirect,
             # but MaxRetryError should not be raised.
-            response = http.request("GET", f"{self.base_url}/redirect", redirect=False)
+            response = http.request(
+                "GET", "%s/redirect" % self.base_url, redirect=False
+            )
             assert response.status == 303
 
     @pytest.mark.parametrize(
@@ -115,25 +117,27 @@ class TestPoolManager(HTTPDummyServerTestCase):
             Retry(total=False, redirect=False),
         ),
     )
-    def test_redirects_disabled_for_pool_manager_with_false(
-        self, retries: typing.Literal[False] | Retry
-    ) -> None:
+    def test_redirects_disabled_for_pool_manager_with_false(self, retries):
         """
         Check that setting retries set to False on the pool manager disables
         raising MaxRetryError and redirect=True does not change the
         behavior.
         """
         with PoolManager(retries=retries) as http:
-            response = http.request("GET", f"{self.base_url}/redirect")
+            response = http.request("GET", "%s/redirect" % self.base_url)
             assert response.status == 303
 
-            response = http.request("GET", f"{self.base_url}/redirect", redirect=True)
+            response = http.request(
+                "GET", "%s/redirect" % self.base_url, redirect=True
+            )
             assert response.status == 303
 
-            response = http.request("GET", f"{self.base_url}/redirect", redirect=False)
+            response = http.request(
+                "GET", "%s/redirect" % self.base_url, redirect=False
+            )
             assert response.status == 303
 
-    def test_redirects_disabled_for_individual_request(self) -> None:
+    def test_redirects_disabled_for_individual_request(self):
         """
         Check handling redirects when they are meant to be disabled
         on the request level.
@@ -141,27 +145,41 @@ class TestPoolManager(HTTPDummyServerTestCase):
         with PoolManager() as http:
             # Check when redirect is not passed.
             with pytest.raises(MaxRetryError):
-                http.request("GET", f"{self.base_url}/redirect", retries=0)
-            response = http.request("GET", f"{self.base_url}/redirect", retries=False)
+                http.request("GET", "%s/redirect" % self.base_url, retries=0)
+            response = http.request(
+                "GET", "%s/redirect" % self.base_url, retries=False
+            )
             assert response.status == 303
 
             # Check when redirect=True.
             with pytest.raises(MaxRetryError):
                 http.request(
-                    "GET", f"{self.base_url}/redirect", retries=0, redirect=True
+                    "GET",
+                    "%s/redirect" % self.base_url,
+                    retries=0,
+                    redirect=True,
                 )
             response = http.request(
-                "GET", f"{self.base_url}/redirect", retries=False, redirect=True
+                "GET",
+                "%s/redirect" % self.base_url,
+                retries=False,
+                redirect=True,
             )
             assert response.status == 303
 
             # Check when redirect=False.
             response = http.request(
-                "GET", f"{self.base_url}/redirect", retries=0, redirect=False
+                "GET",
+                "%s/redirect" % self.base_url,
+                retries=0,
+                redirect=False,
             )
             assert response.status == 303
             response = http.request(
-                "GET", f"{self.base_url}/redirect", retries=False, redirect=False
+                "GET",
+                "%s/redirect" % self.base_url,
+                retries=False,
+                redirect=False,
             )
             assert response.status == 303
 
@@ -224,15 +242,15 @@ class TestPoolManager(HTTPDummyServerTestCase):
             with pytest.raises(MaxRetryError):
                 http.request(
                     "GET",
-                    f"{self.base_url}/redirect",
-                    fields={"target": f"/redirect?target={self.base_url}/"},
+                    "%s/redirect" % self.base_url,
+                    fields={"target": "/redirect?target=%s/" % self.base_url},
                 )
 
             # Here we allow more retries for the request.
             response = http.request(
                 "GET",
-                f"{self.base_url}/redirect",
-                fields={"target": f"/redirect?target={self.base_url}/"},
+                "%s/redirect" % self.base_url,
+                fields={"target": "/redirect?target=%s/" % self.base_url},
                 retries=2,
             )
             assert response.status == 200

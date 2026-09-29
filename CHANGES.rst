@@ -1,3 +1,28 @@
+2.6.3.post2 (ActiveState)
+=========================
+
+ActiveState security release for the Python 3.9 line. It backports the
+security fixes from urllib3 2.7.0, which dropped Python 3.9. The package
+version is ``2.6.3.post2``; ``urllib3.__version__`` stays ``"2.6.3"`` so
+that ``requests`` does not emit ``RequestsDependencyWarning``.
+
+- Fixed a high-severity security issue (CVE-2026-44432) where
+  decompression-bomb safeguards of the streaming API were bypassed:
+
+  1. When ``HTTPResponse.drain_conn()`` was called after the response had
+     been read and decompressed partially.
+  2. During the second ``HTTPResponse.read(amt=N)`` or
+     ``HTTPResponse.stream(amt=N)`` call when the response was decompressed
+     using the official `Brotli <https://pypi.org/project/brotli/>`__ library.
+
+  (`GHSA-mf9v-mfxr-j63j <https://github.com/urllib3/urllib3/security/advisories/GHSA-mf9v-mfxr-j63j>`__)
+- Fixed a high-severity security issue (CVE-2026-44431) where HTTP pools
+  created using ``ProxyManager.connection_from_url`` did not strip sensitive
+  headers specified in ``Retry.remove_headers_on_redirect`` when redirecting
+  to a different host.
+  (`GHSA-qccp-gfcp-xxvc <https://github.com/urllib3/urllib3/security/advisories/GHSA-qccp-gfcp-xxvc>`__)
+
+
 2.6.3 (2026-01-07)
 ==================
 

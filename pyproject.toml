@@ -1,7 +1,7 @@
 # This file is protected via CODEOWNERS
 
 [build-system]
-requires = ["hatchling>=1.27.0,<2", "hatch-vcs>=0.4.0,<0.6.0", "setuptools-scm>=8,<10"]
+requires = ["hatchling>=1.27.0,<2"]
 build-backend = "hatchling.build"
 
 [project]
@@ -39,7 +39,10 @@ classifiers = [
   "Topic :: Software Development :: Libraries",
 ]
 requires-python = ">=3.9"
-dynamic = ["version"]
+# ActiveState security release. The package metadata carries the post-release,
+# while urllib3.__version__ (src/urllib3/_version.py) stays "2.6.3": requests
+# unpacks __version__ as exactly major.minor.patch and warns on anything else.
+version = "2.6.3.post2"
 
 [project.optional-dependencies]
 brotli = [
@@ -112,13 +115,6 @@ docs = [
 "Documentation" = "https://urllib3.readthedocs.io"
 "Code" = "https://github.com/urllib3/urllib3"
 "Issue tracker" = "https://github.com/urllib3/urllib3/issues"
-
-[tool.hatch.version]
-source = "vcs"
-[tool.hatch.version.raw-options]
-local_scheme = "no-local-version"
-[tool.hatch.build.hooks.vcs]
-version-file = "src/urllib3/_version.py"
 
 [tool.hatch.build.targets.sdist]
 include = [

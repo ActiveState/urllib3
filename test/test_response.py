@@ -1959,8 +1959,8 @@ class MockChunkedEncodingResponse:
                 self.cur_chunk = self.cur_chunk[amt:]
             return chunk_part
 
-    def readline(self) -> bytes:
-        return self.pop_current_chunk(till_crlf=True)
+    def readline(self, amt: int = -1) -> bytes:
+        return self.pop_current_chunk(amt, till_crlf=amt < 0)
 
     def read(self, amt: int = -1) -> bytes:
         return self.pop_current_chunk(amt)

@@ -1,6 +1,22 @@
 Changes
 =======
 
+1.26.20.post4 (2026-10-22)
+--------------------------
+
+* - Fixed a security issue where the streaming API (``read(amt)``,
+  ``stream()``, ``read_chunked()``) fully decompressed small amounts of
+  highly compressed data in one operation. Decoding is now bounded by the
+  requested amount and the rest is kept for later reads. Bounded Brotli
+  decoding needs Brotli >= 1.2.0; older Brotli or brotlipy decode without
+  a bound and emit a ``DependencyWarning``.
+  (CVE-2025-66471, GHSA-2xpw-w6gg-jr37)
+* - ``HTTPResponse.drain_conn()`` now discards the remaining body without
+  decoding it even after decoding has started, so draining a partially
+  read response cannot bypass the bound above.
+  (hardening from CVE-2026-44432, GHSA-mf9v-mfxr-j63j)
+
+
 1.26.20.post3 (2026-10-22)
 --------------------------
 
@@ -23,7 +39,8 @@ Changes
   (CVE-2026-97687, GHSA-8988-9cw3-xx77)
 
 Known open: CVE-2025-66471 (GHSA-2xpw-w6gg-jr37, unbounded decompression in
-the streaming ``read(amt)``/``stream()`` API) is not fixed in this release.
+the streaming ``read(amt)``/``stream()`` API) is not fixed in this release;
+see 1.26.20.post4.
 
 Versioning: this release uses a PEP 440 post-release (``1.26.20.post3``)
 instead of the earlier ``1.26.20+security.N`` local-version label.

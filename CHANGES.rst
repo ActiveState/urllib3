@@ -15,6 +15,15 @@ Changes
   decoding it even after decoding has started, so draining a partially
   read response cannot bypass the bound above.
   (hardening from CVE-2026-44432, GHSA-mf9v-mfxr-j63j)
+* - The bounded Deflate decoder no longer loops forever on data after the
+  end of the stream. (port of the CVE-2026-97688 fix, GHSA-gh4c-6fx4-qh6g)
+* - ``read(amt)`` on a compressed response now returns at most about
+  ``amt`` decoded bytes; output still held by the decoder is returned by
+  later reads, and the decoder is flushed when the connection is
+  exhausted. Calling ``read(decode_content=False)`` while decoded data
+  is still pending raises ``RuntimeError`` instead of losing it.
+* - ``stream(0)`` and ``read_chunked(0)`` return instead of looping, and
+  ``drain_conn()`` discards the body 64 KiB at a time.
 
 
 1.26.20.post3 (2026-10-22)

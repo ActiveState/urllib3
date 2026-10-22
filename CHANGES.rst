@@ -1,6 +1,24 @@
 Changes
 =======
 
+1.26.20.post3 (2026-10-22)
+--------------------------
+
+* - Fixed a security issue where ``HTTPResponse.drain_conn()``, which
+  ``HTTPConnectionPool.urlopen`` and ``PoolManager.urlopen`` call on every
+  followed redirect, decoded the whole redirect body. With
+  ``preload_content=False`` a small compressed redirect body could be
+  decompressed into an arbitrarily large amount of memory. Redirect bodies
+  are now discarded without decoding unless decoding had already started.
+  (CVE-2026-21441, GHSA-38jv-5279-wg99)
+
+Known open: CVE-2025-66471 (GHSA-2xpw-w6gg-jr37, unbounded decompression in
+the streaming ``read(amt)``/``stream()`` API) is not fixed in this release.
+
+Versioning: this release uses a PEP 440 post-release (``1.26.20.post3``)
+instead of the earlier ``1.26.20+security.N`` local-version label.
+
+
 1.26.20.2 (2026-05-13)
 ----------------------
 

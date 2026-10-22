@@ -189,8 +189,18 @@ class TestingApp(RequestHandler):
         elif isinstance(status, bytes):
             status = status.decode("latin-1")
 
+        compressed = request.params.get("compressed") == b"true"
+
         headers = [("Location", target)]
-        return Response(status=status, headers=headers)
+        if compressed:
+            headers.append(("Content-Encoding", "gzip"))
+            fileobj = BytesIO()
+            with gzip.GzipFile(mode="wb", fileobj=fileobj) as f:
+                f.write(b"foo")
+            body = fileobj.getvalue()
+        else:
+            body = ""
+        return Response(body, status=status, headers=headers)
 
     def not_found(self, request):
         return Response("Not found", status="404 Not Found")

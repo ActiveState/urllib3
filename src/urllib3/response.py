@@ -59,6 +59,10 @@ class DeflateDecoder(object):
     def decompress(self, data, max_length=-1):
         data = self._unfed_data + data
         self._unfed_data = b""
+        # Data received after EOF cannot produce more output from this
+        # Deflate stream.
+        if self._stream_finished():
+            return b""
         if not data and not self._obj.unconsumed_tail:
             return data
         original_max_length = max_length
@@ -97,10 +101,20 @@ class DeflateDecoder(object):
             finally:
                 self._first_try_data = b""
 
+    def _stream_finished(self):
+        eof = getattr(self._obj, "eof", None)
+        if eof is not None:
+            return eof
+        # Python 2's decompressobj has no ``eof``. Input left over after
+        # the end of the stream is kept in ``unused_data``.
+        return bool(self._obj.unused_data)
+
     @property
     def has_unconsumed_tail(self):
         return bool(self._unfed_data) or (
-            bool(self._obj.unconsumed_tail) and not self._first_try
+            bool(self._obj.unconsumed_tail)
+            and not self._first_try
+            and not self._stream_finished()
         )
 
 

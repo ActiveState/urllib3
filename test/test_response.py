@@ -659,6 +659,40 @@ class TestResponse(object):
             first = r.read(amt)
             assert first + r.data == payload
 
+    # Before the fix the read loop spins inside stream()/read_chunked()
+    # without yielding, so only a timeout can turn a regression into a failure.
+    @pytest.mark.timeout(10)
+    @pytest.mark.parametrize("read_method", ["stream", "read_chunked"])
+    @pytest.mark.parametrize("raw", [False, True])
+    def test_deflate_with_trailing_data_terminates(self, read_method, raw):
+        # CVE-2026-97688 (GHSA-gh4c-6fx4-qh6g): bytes after the end of a
+        # Deflate stream must not keep the decoder reporting pending input.
+        payload = b"A" * 100
+        if raw:
+            compress = zlib.compressobj(6, zlib.DEFLATED, -zlib.MAX_WBITS)
+            compressed = compress.compress(payload) + compress.flush()
+        else:
+            compressed = zlib.compress(payload)
+        compressed += b"tail"
+
+        if read_method == "read_chunked":
+            httplib_r = httplib.HTTPResponse(MockSock)
+            httplib_r.fp = MockChunkedEncodingResponse([compressed])
+            r = HTTPResponse(
+                httplib_r,
+                preload_content=False,
+                headers={"transfer-encoding": "chunked", "content-encoding": "deflate"},
+            )
+        else:
+            r = HTTPResponse(
+                BytesIO(compressed),
+                headers={"content-encoding": "deflate"},
+                preload_content=False,
+            )
+
+        pieces = list(getattr(r, read_method)(50, decode_content=True))
+        assert b"".join(pieces) == payload
+
     def test_streaming(self):
         fp = BytesIO(b"foo")
         resp = HTTPResponse(fp, preload_content=False)

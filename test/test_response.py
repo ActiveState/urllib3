@@ -460,6 +460,40 @@ class TestResponse(object):
             next(reader)
         assert re.match("I/O operation on closed file.?", str(ctx.value))
 
+    @mock.patch("urllib3.response.GzipDecoder.decompress")
+    def test_drain_conn_does_not_decode(self, gzip_decompress):
+        compress = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+        data = compress.compress(b"foo" * 1024)
+        data += compress.flush()
+
+        fp = BytesIO(data)
+        resp = HTTPResponse(
+            fp, headers={"content-encoding": "gzip"}, preload_content=False
+        )
+        resp.drain_conn()
+
+        gzip_decompress.assert_not_called()
+        assert fp.read() == b""
+
+    def test_drain_conn_continues_decoding_once_started(self):
+        compress = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+        data = compress.compress(b"foo" * 1024)
+        data += compress.flush()
+
+        fp = BytesIO(data)
+        resp = HTTPResponse(
+            fp, headers={"content-encoding": "gzip"}, preload_content=False
+        )
+        resp.read(10)
+        assert resp._has_decoded_content
+
+        with mock.patch.object(
+            resp._decoder, "decompress", wraps=resp._decoder.decompress
+        ) as decompress:
+            resp.drain_conn()
+        decompress.assert_called()
+        assert fp.read() == b""
+
     def test_streaming(self):
         fp = BytesIO(b"foo")
         resp = HTTPResponse(fp, preload_content=False)

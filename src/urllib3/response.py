@@ -453,6 +453,10 @@ class HTTPResponse(io.IOBase):
 
         Unread data in the HTTPResponse connection blocks the connection from being released back to the pool.
         """
+        if self._has_decoded_content:
+            # The body is discarded without decompression, so drop the
+            # decoder and any data pending in it first.
+            self._decoder = None
         try:
             # Discard the rest of the body without decoding it, even if
             # decoding has already started.
@@ -460,8 +464,7 @@ class HTTPResponse(io.IOBase):
         except (HTTPError, SocketError, BaseSSLError, HTTPException):
             pass
         if self._has_decoded_content:
-            # The read above skips decompression, so drop the decoder to
-            # avoid keeping its pending data in memory.
+            # read() set up a fresh decoder; it is not needed either.
             self._decoder = None
 
     @property
@@ -731,6 +734,19 @@ class HTTPResponse(io.IOBase):
 
         if self._fp is None:
             return
+
+        if (
+            not decode_content
+            and self._decoder
+            and self._decoder.has_unconsumed_tail
+        ):
+            # Input that a decoding read already handed to the decoder can no
+            # longer be returned raw, so switching modes here would silently
+            # lose it.
+            raise RuntimeError(
+                "Calling read(decode_content=False) is not supported while "
+                "data from read(decode_content=True) is still being decoded."
+            )
 
         if (
             amt is not None

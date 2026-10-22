@@ -693,6 +693,23 @@ class TestResponse(object):
         pieces = list(getattr(r, read_method)(50, decode_content=True))
         assert b"".join(pieces) == payload
 
+    def test_raw_read_while_decoded_data_is_pending_is_refused(self):
+        compress = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+        data = compress.compress(b"z" * 2000000) + compress.flush()
+        r = HTTPResponse(
+            BytesIO(data), headers={"content-encoding": "gzip"}, preload_content=False
+        )
+        assert r.read(1024, decode_content=True) == b"z" * 1024
+        assert r._decoder.has_unconsumed_tail
+        with pytest.raises(RuntimeError, match="still being decoded"):
+            r.read(decode_content=False)
+        # Nothing was lost: decoding can carry on.
+        assert len(r.read(1024, decode_content=True)) == 1024
+
+        # drain_conn() still discards everything without decoding.
+        r.drain_conn()
+        assert r._decoder is None
+
     def test_streaming(self):
         fp = BytesIO(b"foo")
         resp = HTTPResponse(fp, preload_content=False)

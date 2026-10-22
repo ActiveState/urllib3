@@ -746,6 +746,66 @@ class TestResponse(object):
         assert read.call_args_list[0] == mock.call(65536, decode_content=False)
         assert len(read.call_args_list) > 1
 
+    @pytest.mark.parametrize("encoding", ["deflate", "deflate-raw", "gzip"])
+    @pytest.mark.parametrize("amt", [1, 7, 1024])
+    def test_stream_flushes_decoder_when_fp_closes_at_content_length(
+        self, encoding, amt
+    ):
+        # httplib closes the fp as soon as Content-Length is reached, which
+        # can end stream()'s loop while zlib still holds output (raw deflate
+        # has no trailer to read).
+        rnd = random.Random(amt)
+        payloads = [b"\0" * 65537] + [
+            b"".join(six.int2byte(rnd.randint(0, 255)) for _ in range(rnd.randint(0, 300)))
+            + b"a" * rnd.randint(0, 5000)
+            for _ in range(20)
+        ]
+        for payload in payloads:
+            if encoding == "deflate":
+                name, body = "deflate", zlib.compress(payload)
+            else:
+                wbits = -zlib.MAX_WBITS if encoding == "deflate-raw" else 16 + zlib.MAX_WBITS
+                compress = zlib.compressobj(6, zlib.DEFLATED, wbits)
+                body = compress.compress(payload) + compress.flush()
+                name = "deflate" if encoding == "deflate-raw" else "gzip"
+            r = _httplib_response(body, {"Content-Encoding": name})
+            assert b"".join(r.stream(amt)) == payload
+
+    def test_raw_read_after_failed_decode_is_allowed(self):
+        # requests falls back to raw.read(decode_content=False) when a
+        # redirect body cannot be decoded; that must not raise.
+        body = b"<html>not deflate</html>" * 10
+        r = _httplib_response(body, {"Content-Encoding": "deflate"})
+        with pytest.raises(DecodeError):
+            r.read(16)
+        r.read(decode_content=False)
+
+        r = _httplib_response(body, {"Content-Encoding": "deflate"})
+        with pytest.raises(DecodeError):
+            r.read(16)
+        r.drain_conn()
+
+    def test_raw_read_after_mid_stream_decode_failure_is_allowed(self):
+        compress = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+        data = compress.compress(b"z" * 2000000) + compress.flush()
+        r = HTTPResponse(
+            BytesIO(data), headers={"content-encoding": "gzip"}, preload_content=False
+        )
+        assert len(r.read(1024)) == 1024
+        with mock.patch.object(r._decoder, "decompress", side_effect=zlib.error):
+            with pytest.raises(DecodeError):
+                r.read(1024)
+        r.read(decode_content=False)
+
+    def test_broken_brotli_decoder_reports_no_tail(self):
+        if brotli is None or not hasattr(brotli.Decompressor(), "can_accept_more_data"):
+            pytest.skip("Brotli >= 1.2.0 is not available")
+        r = _httplib_response(b"definitely not brotli" * 10, {"Content-Encoding": "br"})
+        with pytest.raises(DecodeError):
+            r.read(16)
+        assert r._decoder.has_unconsumed_tail is False
+        r.drain_conn()
+
     def test_streaming(self):
         fp = BytesIO(b"foo")
         resp = HTTPResponse(fp, preload_content=False)
@@ -1262,6 +1322,26 @@ class TestResponse(object):
             with pytest.raises(SSLError) as e:
                 resp.read()
             assert e.value.args[0] == mac_error
+
+
+class _MakefileSock(object):
+    def __init__(self, raw):
+        self.raw = raw
+
+    def makefile(self, *args, **kwargs):
+        return BytesIO(self.raw)
+
+
+def _httplib_response(body, headers):
+    """
+    A urllib3 HTTPResponse over a real httplib response with Content-Length,
+    whose fp httplib closes as soon as the body has been read.
+    """
+    head = "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n" % len(body)
+    head += "".join("%s: %s\r\n" % item for item in headers.items()) + "\r\n"
+    r = httplib.HTTPResponse(_MakefileSock(head.encode("latin-1") + body))
+    r.begin()
+    return HTTPResponse.from_httplib(r, preload_content=False)
 
 
 class MockChunkedEncodingResponse(object):

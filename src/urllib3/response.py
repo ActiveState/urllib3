@@ -252,6 +252,9 @@ if brotli is not None:
                     return True
             except AttributeError:
                 return False
+            except brotli.error:
+                # The decoder failed earlier; it holds nothing decodable.
+                return False
             return self._output_limited
 
         def flush(self):
@@ -398,6 +401,7 @@ class HTTPResponse(io.IOBase):
         self.strict = strict
         self.decode_content = decode_content
         self._has_decoded_content = False
+        self._decode_failed = False
         self.retries = retries
         self.enforce_content_length = enforce_content_length
         self.auto_close = auto_close
@@ -461,10 +465,9 @@ class HTTPResponse(io.IOBase):
 
         Unread data in the HTTPResponse connection blocks the connection from being released back to the pool.
         """
-        if self._has_decoded_content:
-            # The body is discarded without decompression, so drop the
-            # decoder and any data pending in it first.
-            self._decoder = None
+        # The body is discarded without decompression, so drop the decoder
+        # and any data pending in it first.
+        self._decoder = None
         try:
             # Discard the rest of the body without decoding it, even if
             # decoding has already started, 64 KiB at a time.
@@ -472,9 +475,8 @@ class HTTPResponse(io.IOBase):
                 pass
         except (HTTPError, SocketError, BaseSSLError, HTTPException):
             pass
-        if self._has_decoded_content:
-            # read() set up a fresh decoder; it is not needed either.
-            self._decoder = None
+        # read() set up a fresh decoder; it is not needed either.
+        self._decoder = None
 
     @property
     def data(self):
@@ -590,6 +592,9 @@ class HTTPResponse(io.IOBase):
                 data = self._decoder.decompress(data, max_length=max_length)
                 self._has_decoded_content = True
         except self.DECODER_ERROR_CLASSES as e:
+            # Whatever the decoder still holds can no longer be decoded, so a
+            # raw read afterwards loses nothing that could have been returned.
+            self._decode_failed = True
             content_encoding = self.headers.get("content-encoding", "").lower()
             raise DecodeError(
                 "Received response with content-encoding: %s, but "
@@ -746,6 +751,8 @@ class HTTPResponse(io.IOBase):
 
         if (
             not decode_content
+            and self._has_decoded_content
+            and not self._decode_failed
             and self._decoder
             and self._decoder.has_unconsumed_tail
         ):
@@ -847,6 +854,16 @@ class HTTPResponse(io.IOBase):
             ):
                 data = self.read(amt=amt, decode_content=decode_content)
 
+                if data:
+                    yield data
+
+            # httplib closes the file as soon as Content-Length is reached,
+            # which can end the loop above while the decoder still holds output
+            # from input it has already consumed. Flush it; the file is done.
+            if decode_content is None:
+                decode_content = self.decode_content
+            if decode_content and self._decoder:
+                data = self._decode(b"", decode_content, flush_decoder=True)
                 if data:
                     yield data
 

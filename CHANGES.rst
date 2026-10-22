@@ -25,6 +25,16 @@ Changes
   successful decode, while decoded data is still pending, raises
   ``RuntimeError`` instead of losing it; it is still allowed after a
   failed decode.
+
+  To read a compressed body in pieces, use ``stream()`` (or
+  ``read_chunked()`` for chunked responses). ``closed`` can be True while
+  ``read(amt)`` still has decoded data to return: when the whole body
+  arrives at once, the file object reaches its end on the first read but
+  only ``amt`` bytes are handed out. A loop such as
+  ``while not r.closed: r.read(amt)`` can therefore stop early. Looping
+  on ``read(amt)`` until it returns ``b""`` was never reliable on this
+  line either, since ``read(amt)`` can return ``b""`` before the end of a
+  compressed body.
 * - ``stream(0)`` and ``read_chunked(0)`` return instead of looping, and
   ``drain_conn()`` discards the body 64 KiB at a time.
 

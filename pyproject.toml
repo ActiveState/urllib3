@@ -42,7 +42,7 @@ requires-python = ">=3.9"
 # ActiveState security release. The package metadata carries the post-release,
 # while urllib3.__version__ (src/urllib3/_version.py) stays "2.6.3": requests
 # unpacks __version__ as exactly major.minor.patch and warns on anything else.
-version = "2.6.3.post2"
+version = "2.6.3.post3"
 
 [project.optional-dependencies]
 brotli = [

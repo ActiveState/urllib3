@@ -1,3 +1,21 @@
+2.6.3.post3 (ActiveState)
+=========================
+
+ActiveState bug-fix release for the Python 3.9 line. The package version
+is ``2.6.3.post3``; ``urllib3.__version__`` stays ``"2.6.3"``.
+
+- Fixed silent truncation of compressed response bodies read in pieces.
+  Since the bounded decompression added in urllib3 2.6.0, a bounded read
+  could reach the end of the body while the decoder still held a few
+  hundred bytes of output, and that output was dropped by
+  ``HTTPResponse.stream()``, ``read(amt)`` loops and readers built on
+  ``readinto()`` such as ``shutil.copyfileobj()``. This affected raw
+  deflate bodies (``Content-Encoding: deflate`` without the zlib wrapper)
+  sent with ``Content-Length``; requests' ``iter_content()`` lost the end
+  of such bodies the same way. The decoder is now flushed when the body
+  ends. Upstream urllib3 2.6.0 through 2.8.0 have the same issue.
+
+
 2.6.3.post2 (ActiveState)
 =========================
 

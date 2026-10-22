@@ -19,9 +19,12 @@ Changes
   end of the stream. (port of the CVE-2026-97688 fix, GHSA-gh4c-6fx4-qh6g)
 * - ``read(amt)`` on a compressed response now returns at most about
   ``amt`` decoded bytes; output still held by the decoder is returned by
-  later reads, and the decoder is flushed when the connection is
-  exhausted. Calling ``read(decode_content=False)`` while decoded data
-  is still pending raises ``RuntimeError`` instead of losing it.
+  later reads, and the decoder is flushed when the body ends, including
+  when ``stream()`` finishes on a response whose file object closes at
+  Content-Length. Calling ``read(decode_content=False)`` after a
+  successful decode, while decoded data is still pending, raises
+  ``RuntimeError`` instead of losing it; it is still allowed after a
+  failed decode.
 * - ``stream(0)`` and ``read_chunked(0)`` return instead of looping, and
   ``drain_conn()`` discards the body 64 KiB at a time.
 

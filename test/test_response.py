@@ -145,10 +145,10 @@ class TestResponse(object):
 
         assert r.read(3) == b""
         # Buffer in case we need to switch to the raw stream
-        assert r._decoder._data is not None
+        assert r._decoder._first_try_data
         assert r.read(1) == b"f"
         # Now that we've decoded data, we just stream through the decoder
-        assert r._decoder._data is None
+        assert r._decoder._first_try_data == b""
         assert r.read(2) == b"oo"
         assert r.read() == b""
         assert r.read() == b""
@@ -166,7 +166,7 @@ class TestResponse(object):
         assert r.read(1) == b""
         assert r.read(1) == b"f"
         # Once we've decoded data, we just stream to the decoder; no buffering
-        assert r._decoder._data is None
+        assert r._decoder._first_try_data == b""
         assert r.read(2) == b"oo"
         assert r.read() == b""
         assert r.read() == b""
@@ -475,7 +475,7 @@ class TestResponse(object):
         gzip_decompress.assert_not_called()
         assert fp.read() == b""
 
-    def test_drain_conn_continues_decoding_once_started(self):
+    def test_drain_conn_does_not_decode_after_partial_read(self):
         compress = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
         data = compress.compress(b"foo" * 1024)
         data += compress.flush()
@@ -491,7 +491,8 @@ class TestResponse(object):
             resp._decoder, "decompress", wraps=resp._decoder.decompress
         ) as decompress:
             resp.drain_conn()
-        decompress.assert_called()
+        decompress.assert_not_called()
+        assert resp._decoder is None
         assert fp.read() == b""
 
     def test_chunk_size_line_too_long(self):
@@ -548,6 +549,69 @@ class TestResponse(object):
         assert fp.closed
         assert r.isclosed()
         assert resp.closed
+    @pytest.mark.parametrize("read_method", ["read", "stream", "read_chunked"])
+    @pytest.mark.parametrize(
+        "encoding", ["deflate", "deflate-raw", "gzip", "gzip-multi", "br"]
+    )
+    def test_decompression_bomb_is_read_in_bounded_pieces(self, encoding, read_method):
+        # CVE-2025-66471: a small amount of highly compressed data must not
+        # be fully decoded by one bounded read.
+        total = 16 * 1024 * 1024
+        payload = b"\0" * total
+        if encoding == "deflate":
+            name, compressed = "deflate", zlib.compress(payload)
+        elif encoding == "deflate-raw":
+            compress = zlib.compressobj(6, zlib.DEFLATED, -zlib.MAX_WBITS)
+            name = "deflate"
+            compressed = compress.compress(payload) + compress.flush()
+        elif encoding in ("gzip", "gzip-multi"):
+            members = 2 if encoding == "gzip-multi" else 1
+            name, compressed = "gzip", b""
+            for _ in range(members):
+                compress = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+                part = payload[: total // members]
+                compressed += compress.compress(part) + compress.flush()
+        else:
+            if brotli is None or not hasattr(brotli.Decompressor(), "can_accept_more_data"):
+                pytest.skip("Brotli >= 1.2.0 is not available")
+            name, compressed = "br", brotli.compress(payload)
+        assert len(compressed) < total // 100
+
+        amt = 64 * 1024
+        # Brotli rounds its output limit up to its internal buffer size.
+        bound = amt if name != "br" else 4 * amt
+
+        if read_method in ("read_chunked", "stream"):
+            httplib_r = httplib.HTTPResponse(MockSock)
+            httplib_r.fp = MockChunkedEncodingResponse([compressed])
+            r = HTTPResponse(
+                httplib_r,
+                preload_content=False,
+                headers={"transfer-encoding": "chunked", "content-encoding": name},
+            )
+            pieces = getattr(r, read_method)(amt=amt, decode_content=True)
+        else:
+            r = HTTPResponse(
+                BytesIO(compressed),
+                headers={"content-encoding": name},
+                preload_content=False,
+            )
+
+            def read_all():
+                while True:
+                    piece = r.read(amt=amt, decode_content=True)
+                    if not piece:
+                        return
+                    yield piece
+
+            pieces = read_all()
+
+        received = 0
+        for piece in pieces:
+            assert len(piece) <= bound
+            assert piece == b"\0" * len(piece)
+            received += len(piece)
+        assert received == total
 
     def test_streaming(self):
         fp = BytesIO(b"foo")

@@ -23,6 +23,7 @@ from .connection import BaseSSLError, HTTPException
 from .exceptions import (
     BodyNotHttplibCompatible,
     DecodeError,
+    DependencyWarning,
     HTTPError,
     IncompleteRead,
     InvalidChunkLength,
@@ -48,33 +49,59 @@ _MAX_CHUNK_LINE_LENGTH = 2 ** 16
 class DeflateDecoder(object):
     def __init__(self):
         self._first_try = True
-        self._data = b""
+        self._first_try_data = b""
+        self._unfed_data = b""
         self._obj = zlib.decompressobj()
 
     def __getattr__(self, name):
         return getattr(self._obj, name)
 
-    def decompress(self, data):
-        if not data:
+    def decompress(self, data, max_length=-1):
+        data = self._unfed_data + data
+        self._unfed_data = b""
+        if not data and not self._obj.unconsumed_tail:
             return data
+        original_max_length = max_length
+        if original_max_length < 0:
+            max_length = 0
+        elif original_max_length == 0:
+            # We should not pass 0 to the zlib decompressor because 0 is
+            # the default value that will make zlib decompress without a
+            # length limit.
+            # Data should be stored for subsequent calls.
+            self._unfed_data = data
+            return b""
 
+        # Subsequent calls always reuse `self._obj`. zlib requires
+        # passing the unconsumed tail if decompression is to continue.
+        # max_length is positional: Python 2 does not accept it as a keyword.
         if not self._first_try:
-            return self._obj.decompress(data)
+            return self._obj.decompress(self._obj.unconsumed_tail + data, max_length)
 
-        self._data += data
+        # First call tries with RFC 1950 ZLIB format.
+        self._first_try_data += data
         try:
-            decompressed = self._obj.decompress(data)
+            decompressed = self._obj.decompress(data, max_length)
             if decompressed:
                 self._first_try = False
-                self._data = None
+                self._first_try_data = b""
             return decompressed
+        # On failure, it falls back to RFC 1951 DEFLATE format.
         except zlib.error:
             self._first_try = False
             self._obj = zlib.decompressobj(-zlib.MAX_WBITS)
             try:
-                return self.decompress(self._data)
+                return self.decompress(
+                    self._first_try_data, max_length=original_max_length
+                )
             finally:
-                self._data = None
+                self._first_try_data = b""
+
+    @property
+    def has_unconsumed_tail(self):
+        return bool(self._unfed_data) or (
+            bool(self._obj.unconsumed_tail) and not self._first_try
+        )
 
 
 class GzipDecoderState(object):
@@ -88,30 +115,75 @@ class GzipDecoder(object):
     def __init__(self):
         self._obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
         self._state = GzipDecoderState.FIRST_MEMBER
+        self._unconsumed_tail = b""
 
     def __getattr__(self, name):
         return getattr(self._obj, name)
 
-    def decompress(self, data):
+    def decompress(self, data, max_length=-1):
         ret = bytearray()
-        if self._state == GzipDecoderState.SWALLOW_DATA or not data:
+        if self._state == GzipDecoderState.SWALLOW_DATA:
             return bytes(ret)
+
+        if max_length == 0:
+            # We should not pass 0 to the zlib decompressor because 0 is
+            # the default value that will make zlib decompress without a
+            # length limit.
+            # Data should be stored for subsequent calls.
+            self._unconsumed_tail += data
+            return b""
+
+        # zlib requires passing the unconsumed tail to the subsequent
+        # call if decompression is to continue.
+        data = self._unconsumed_tail + data
+        if not data:
+            return bytes(ret)
+
         while True:
+            # When the end of a gzip member is reached, a new decompressor
+            # must be created for unused (possibly future) data. This is
+            # checked before decompressing because a bounded read can stop
+            # right at the end of a member, leaving the next member as the
+            # tail for the following call.
+            if self._member_finished():
+                self._state = GzipDecoderState.OTHER_MEMBERS
+                self._obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
             try:
-                ret += self._obj.decompress(data)
+                # max_length is positional: Python 2 does not accept it
+                # as a keyword.
+                ret += self._obj.decompress(data, max(max_length - len(ret), 0))
             except zlib.error:
                 previous_state = self._state
                 # Ignore data after the first error
                 self._state = GzipDecoderState.SWALLOW_DATA
+                self._unconsumed_tail = b""
                 if previous_state == GzipDecoderState.OTHER_MEMBERS:
                     # Allow trailing garbage acceptable in other gzip clients
                     return bytes(ret)
                 raise
-            data = self._obj.unused_data
+
+            self._unconsumed_tail = data = (
+                self._obj.unconsumed_tail or self._obj.unused_data
+            )
+            if max_length > 0 and len(ret) >= max_length:
+                break
+
             if not data:
                 return bytes(ret)
-            self._state = GzipDecoderState.OTHER_MEMBERS
-            self._obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
+
+        return bytes(ret)
+
+    def _member_finished(self):
+        eof = getattr(self._obj, "eof", None)
+        if eof is not None:
+            return eof
+        # Python 2's decompressobj has no ``eof``. Input left over after
+        # the end of a member is kept in ``unused_data``.
+        return bool(self._obj.unused_data)
+
+    @property
+    def has_unconsumed_tail(self):
+        return bool(self._unconsumed_tail)
 
 
 if brotli is not None:
@@ -123,9 +195,42 @@ if brotli is not None:
         def __init__(self):
             self._obj = brotli.Decompressor()
             if hasattr(self._obj, "decompress"):
-                self.decompress = self._obj.decompress
+                self._decompress = self._obj.decompress
             else:
-                self.decompress = self._obj.process
+                self._decompress = self._obj.process
+            self._output_limited = False
+
+        # Requires Brotli >= 1.2.0 for `output_buffer_limit`.
+        def decompress(self, data, max_length=-1):
+            try:
+                if max_length > 0:
+                    out = self._decompress(data, output_buffer_limit=max_length)
+                    # Brotli can hold back output while still reporting that
+                    # it accepts more input
+                    # (https://github.com/google/brotli/issues/1396), so a
+                    # call that filled the limit may have more to give.
+                    self._output_limited = len(out) >= max_length
+                    return out
+                else:
+                    self._output_limited = False
+                    return self._decompress(data)
+            except TypeError:
+                # Fallback for Brotli/brotlicffi/brotlipy versions without
+                # the `output_buffer_limit` parameter.
+                warnings.warn(
+                    "Brotli >= 1.2.0 is required to prevent decompression bombs.",
+                    DependencyWarning,
+                )
+                return self._decompress(data)
+
+        @property
+        def has_unconsumed_tail(self):
+            try:
+                if not self._obj.can_accept_more_data():
+                    return True
+            except AttributeError:
+                return False
+            return self._output_limited
 
         def flush(self):
             if hasattr(self._obj, "flush"):
@@ -158,10 +263,35 @@ class MultiDecoder(object):
     def flush(self):
         return self._decoders[0].flush()
 
-    def decompress(self, data):
-        for d in reversed(self._decoders):
-            data = d.decompress(data)
-        return data
+    def decompress(self, data, max_length=-1):
+        if max_length <= 0:
+            for d in reversed(self._decoders):
+                data = d.decompress(data)
+            return data
+
+        ret = bytearray()
+        # Every while loop iteration goes through all decoders once.
+        # It exits when enough data is read or no more data can be read.
+        # It is possible that the while loop iteration does not produce
+        # any data because we retrieve up to `max_length` from every
+        # decoder, and the amount of bytes may be insufficient for the
+        # next decoder to produce enough/any output.
+        while True:
+            any_data = False
+            for d in reversed(self._decoders):
+                data = d.decompress(data, max_length=max_length - len(ret))
+                if data:
+                    any_data = True
+                # We should not break when no data is returned because
+                # next decoders may produce data even with empty input.
+            ret += data
+            if not any_data or len(ret) >= max_length:
+                return bytes(ret)
+            data = b""
+
+    @property
+    def has_unconsumed_tail(self):
+        return any(d.has_unconsumed_tail for d in self._decoders)
 
 
 def _get_decoder(mode):
@@ -310,13 +440,15 @@ class HTTPResponse(io.IOBase):
         Unread data in the HTTPResponse connection blocks the connection from being released back to the pool.
         """
         try:
-            self.read(
-                # Do not spend resources decoding the content unless
-                # decoding has already been initiated.
-                decode_content=self._has_decoded_content,
-            )
+            # Discard the rest of the body without decoding it, even if
+            # decoding has already started.
+            self.read(decode_content=False)
         except (HTTPError, SocketError, BaseSSLError, HTTPException):
             pass
+        if self._has_decoded_content:
+            # The read above skips decompression, so drop the decoder to
+            # avoid keeping its pending data in memory.
+            self._decoder = None
 
     @property
     def data(self):
@@ -417,16 +549,19 @@ class HTTPResponse(io.IOBase):
     if brotli is not None:
         DECODER_ERROR_CLASSES += (brotli.error,)
 
-    def _decode(self, data, decode_content, flush_decoder):
+    def _decode(self, data, decode_content, flush_decoder, max_length=None):
         """
         Decode the data passed in and potentially flush the decoder.
         """
         if not decode_content:
             return data
 
+        if max_length is None or flush_decoder:
+            max_length = -1
+
         try:
             if self._decoder:
-                data = self._decoder.decompress(data)
+                data = self._decoder.decompress(data, max_length=max_length)
                 self._has_decoded_content = True
         except self.DECODER_ERROR_CLASSES as e:
             content_encoding = self.headers.get("content-encoding", "").lower()
@@ -583,6 +718,18 @@ class HTTPResponse(io.IOBase):
         if self._fp is None:
             return
 
+        if (
+            amt is not None
+            and decode_content
+            and self._decoder
+            and self._decoder.has_unconsumed_tail
+        ):
+            # Earlier input is still waiting in the decoder. Hand out up to
+            # ``amt`` bytes of it before reading more from the connection.
+            data = self._decode(b"", decode_content, False, max_length=amt)
+            if data:
+                return data
+
         flush_decoder = False
         fp_closed = getattr(self._fp, "closed", False)
 
@@ -620,7 +767,7 @@ class HTTPResponse(io.IOBase):
             if self.length_remaining is not None:
                 self.length_remaining -= len(data)
 
-            data = self._decode(data, decode_content, flush_decoder)
+            data = self._decode(data, decode_content, flush_decoder, max_length=amt)
 
             if cache_content:
                 self._body = data
@@ -647,7 +794,9 @@ class HTTPResponse(io.IOBase):
             for line in self.read_chunked(amt, decode_content=decode_content):
                 yield line
         else:
-            while not is_fp_closed(self._fp):
+            while not is_fp_closed(self._fp) or (
+                self._decoder and self._decoder.has_unconsumed_tail
+            ):
                 data = self.read(amt=amt, decode_content=decode_content)
 
                 if data:
@@ -852,13 +1001,25 @@ class HTTPResponse(io.IOBase):
             if self._fp.fp is None:
                 return
 
+            if amt and amt < 0:
+                # Negative numbers and `None` should be treated the same,
+                # but httplib handles only `None` correctly.
+                amt = None
+
             while True:
-                self._update_chunk_length()
-                if self.chunk_left == 0:
-                    break
-                chunk = self._handle_chunk(amt)
+                # First, check if any data is left in the decoder's buffer.
+                if self._decoder and self._decoder.has_unconsumed_tail:
+                    chunk = b""
+                else:
+                    self._update_chunk_length()
+                    if self.chunk_left == 0:
+                        break
+                    chunk = self._handle_chunk(amt)
                 decoded = self._decode(
-                    chunk, decode_content=decode_content, flush_decoder=False
+                    chunk,
+                    decode_content=decode_content,
+                    flush_decoder=False,
+                    max_length=amt,
                 )
                 if decoded:
                     yield decoded

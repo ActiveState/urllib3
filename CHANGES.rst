@@ -11,6 +11,16 @@ Changes
   decompressed into an arbitrarily large amount of memory. Redirect bodies
   are now discarded without decoding unless decoding had already started.
   (CVE-2026-21441, GHSA-38jv-5279-wg99)
+* - Fixed a security issue where the streaming chunked-transfer path read
+  chunk-size and trailer lines without a length limit. They are now
+  limited to 65536 bytes and ``ProtocolError`` is raised when exceeded.
+  (CVE-2026-97689, GHSA-vxq7-64xx-v4gw)
+* - Fixed a security issue where the TLS connection to an HTTPS proxy that
+  forwards requests used the target's TLS settings: ``proxy_ssl_context``
+  was ignored, a target ``cert_reqs`` could disable proxy certificate
+  verification, and the target's ``server_hostname``, ``assert_hostname``,
+  ``assert_fingerprint`` and client certificate were applied to the proxy.
+  (CVE-2026-97687, GHSA-8988-9cw3-xx77)
 
 Known open: CVE-2025-66471 (GHSA-2xpw-w6gg-jr37, unbounded decompression in
 the streaming ``read(amt)``/``stream()`` API) is not fixed in this release.

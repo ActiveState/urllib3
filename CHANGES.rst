@@ -4,6 +4,12 @@ Changes
 1.26.20.post4 (2026-10-22)
 --------------------------
 
+The package version is ``1.26.20.post4``, while ``urllib3.__version__``
+is now ``"1.26.20"`` (it was ``"1.26.20.post3"`` in the previous release):
+requests unpacks ``urllib3.__version__`` as major.minor.patch and emits
+``RequestsDependencyWarning`` for anything longer. The User-Agent header
+is ``python-urllib3/1.26.20`` accordingly.
+
 * - Fixed a security issue where the streaming API (``read(amt)``,
   ``stream()``, ``read_chunked()``) fully decompressed small amounts of
   highly compressed data in one operation. Decoding is now bounded by the

@@ -9,10 +9,14 @@ from setuptools import setup
 
 base_path = os.path.dirname(__file__)
 
-# Get the version (borrowed from SQLAlchemy)
+# Get the package version. It is __package_version__ in _version.py, not
+# __version__: on this ActiveState security line __version__ stays "1.26.20"
+# (see _version.py), while the distribution carries the post-release.
 with open(os.path.join(base_path, "src", "urllib3", "_version.py")) as fp:
     VERSION = (
-        re.compile(r""".*__version__ = ["'](.*?)['"]""", re.S).match(fp.read()).group(1)
+        re.compile(r"""^__package_version__ = ["'](.*?)['"]""", re.M)
+        .search(fp.read())
+        .group(1)
     )
 
 

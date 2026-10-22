@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import contextlib
+import random
 import re
 import socket
 import ssl
@@ -549,6 +550,7 @@ class TestResponse(object):
         assert fp.closed
         assert r.isclosed()
         assert resp.closed
+
     @pytest.mark.parametrize("read_method", ["read", "stream", "read_chunked"])
     @pytest.mark.parametrize(
         "encoding", ["deflate", "deflate-raw", "gzip", "gzip-multi", "br"]
@@ -612,6 +614,50 @@ class TestResponse(object):
             assert piece == b"\0" * len(piece)
             received += len(piece)
         assert received == total
+
+    @pytest.mark.parametrize("encoding", ["deflate", "deflate-raw", "gzip"])
+    @pytest.mark.parametrize("amt", [1, 7, 64, 1024])
+    def test_bounded_reads_return_the_whole_body(self, encoding, amt):
+        # A bounded read can stop with all input fed to the decoder and
+        # output still pending in it; that output must not be lost at EOF.
+        rnd = random.Random(amt)
+        for _ in range(25):
+            payload = (
+                b"".join(six.int2byte(rnd.randint(0, 255)) for _ in range(rnd.randint(0, 300)))
+                + b"a" * rnd.randint(0, 3000)
+            )
+            if encoding == "deflate":
+                name, compressed = "deflate", zlib.compress(payload)
+            else:
+                wbits = -zlib.MAX_WBITS if encoding == "deflate-raw" else 16 + zlib.MAX_WBITS
+                compress = zlib.compressobj(6, zlib.DEFLATED, wbits)
+                compressed = compress.compress(payload) + compress.flush()
+                name = "deflate" if encoding == "deflate-raw" else "gzip"
+
+            def make():
+                return HTTPResponse(
+                    BytesIO(compressed),
+                    headers={"content-encoding": name},
+                    preload_content=False,
+                )
+
+            assert b"".join(make().stream(amt)) == payload
+
+            r = make()
+            pieces = []
+            while True:
+                piece = r.read(amt)
+                if not piece and r.isclosed() and not r._decoder.has_unconsumed_tail:
+                    break
+                pieces.append(piece)
+            assert b"".join(pieces) == payload
+
+            r = make()
+            assert r.read(amt) + r.read() == payload
+
+            r = make()
+            first = r.read(amt)
+            assert first + r.data == payload
 
     def test_streaming(self):
         fp = BytesIO(b"foo")

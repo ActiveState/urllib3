@@ -771,6 +771,12 @@ class HTTPResponse(io.IOBase):
 
             if cache_content:
                 self._body = data
+        elif flush_decoder and decode_content and self._decoder:
+            # The connection is exhausted, but the decoder may still hold
+            # output from input it has already consumed (a bounded read can
+            # stop with all input fed in and output still pending). Flush it
+            # instead of dropping it.
+            data = self._decode(b"", decode_content, flush_decoder)
 
         return data
 

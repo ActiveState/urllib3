@@ -148,6 +148,112 @@ class TestHTTPProxyManager(HTTPDummyProxyTestCase):
             r = https.request("GET", "%s/" % self.https_url)
             assert r.status == 200
 
+    # CVE-2026-97687: when forwarding through an HTTPS proxy, the TLS
+    # connection to the proxy must use the proxy's TLS settings, not the
+    # target's.
+
+    def test_https_proxy_forwarding_uses_proxy_ssl_context(self):
+        proxy_ctx = create_urllib3_context()
+        proxy_ctx.load_verify_locations(DEFAULT_CA)
+        # A target context that cannot verify the proxy's certificate.
+        target_ctx = create_urllib3_context()
+        target_ctx.load_verify_locations(self.bad_ca_path)
+
+        with proxy_from_url(
+            self.https_proxy_url,
+            proxy_ssl_context=proxy_ctx,
+            ssl_context=target_ctx,
+            use_forwarding_for_https=True,
+        ) as https:
+            pool = https.connection_from_url(self.https_url)
+            conn = pool._new_conn()
+            try:
+                conn.connect()
+                if hasattr(conn.sock, "context"):  # not on pyOpenSSL's WrappedSocket
+                    assert conn.sock.context is proxy_ctx
+                assert conn.is_verified
+            finally:
+                conn.close()
+
+            r = https.request("GET", "%s/" % self.https_url)
+            assert r.status == 200
+            r = https.request("GET", "%s/" % self.http_url)
+            assert r.status == 200
+
+    def test_https_proxy_forwarding_keeps_proxy_verification(self):
+        # The proxy context cannot verify the proxy, and must keep failing
+        # even though the target is configured with CERT_NONE.
+        proxy_ctx = create_urllib3_context(cert_reqs=ssl.CERT_REQUIRED)
+        proxy_ctx.load_verify_locations(self.bad_ca_path)
+
+        with proxy_from_url(
+            self.https_proxy_url,
+            proxy_ssl_context=proxy_ctx,
+            cert_reqs="CERT_NONE",
+            use_forwarding_for_https=True,
+            retries=False,
+        ) as https:
+            with pytest.raises(SSLError):
+                https.request("GET", "%s/" % self.https_url)
+            with pytest.raises(SSLError):
+                https.request("GET", "%s/" % self.http_url)
+
+        assert proxy_ctx.verify_mode == ssl.CERT_REQUIRED
+
+    @pytest.mark.parametrize(
+        "target_tls_kwargs",
+        [
+            pytest.param({"server_hostname": "example.com"}, id="server-hostname"),
+            pytest.param({"assert_hostname": "example.com"}, id="assert-hostname"),
+            pytest.param({"assert_fingerprint": "00" * 32}, id="assert-fingerprint"),
+            pytest.param({"cert_file": "/nonexistent/client.pem"}, id="client-cert"),
+        ],
+    )
+    def test_https_proxy_forwarding_ignores_target_identity_settings(
+        self, target_tls_kwargs
+    ):
+        proxy_ctx = create_urllib3_context()
+        proxy_ctx.load_verify_locations(DEFAULT_CA)
+
+        with proxy_from_url(
+            self.https_proxy_url,
+            proxy_ssl_context=proxy_ctx,
+            use_forwarding_for_https=True,
+            **target_tls_kwargs
+        ) as https:
+            pool = https.connection_from_url(self.https_url)
+            conn = pool._new_conn()
+            try:
+                conn.connect()
+                if hasattr(conn.sock, "context"):  # not on pyOpenSSL's WrappedSocket
+                    assert conn.sock.context is proxy_ctx
+            finally:
+                conn.close()
+
+    def test_https_proxy_forwarding_ssl_context_fallback(self):
+        # Without proxy_ssl_context, the connection's ssl_context is still
+        # used for the proxy handshake, as before.
+        ssl_context = create_urllib3_context()
+        ssl_context.load_verify_locations(DEFAULT_CA)
+
+        with proxy_from_url(
+            self.https_proxy_url,
+            ssl_context=ssl_context,
+            use_forwarding_for_https=True,
+        ) as https:
+            pool = https.connection_from_url(self.https_url)
+            conn = pool._new_conn()
+            try:
+                conn.connect()
+                if hasattr(conn.sock, "context"):  # not on pyOpenSSL's WrappedSocket
+                    assert conn.sock.context is ssl_context
+                assert conn.is_verified
+            finally:
+                conn.close()
+
+            r = https.request("GET", "%s/" % self.https_url)
+            assert r.status == 200
+
     def test_nagle_proxy(self):
         """Test that proxy connections do not have TCP_NODELAY turned on"""
         with ProxyManager(self.proxy_url) as http:

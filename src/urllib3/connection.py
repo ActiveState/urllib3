@@ -373,7 +373,6 @@ class HTTPSConnection(HTTPConnection):
             self.sock, self.is_verified = self._wrap_proxy_socket(self.host, conn)
             return
 
-
         if self._is_using_tunnel():
             if self.tls_in_tls_required:
                 self.sock = conn = self._connect_tls_proxy(hostname, conn)

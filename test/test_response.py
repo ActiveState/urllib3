@@ -474,7 +474,8 @@ class TestResponse(object):
         resp.drain_conn()
 
         gzip_decompress.assert_not_called()
-        assert fp.read() == b""
+        # The body was read to the end; read(amt) closes it at EOF.
+        assert fp.closed
 
     def test_drain_conn_does_not_decode_after_partial_read(self):
         compress = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
@@ -494,7 +495,8 @@ class TestResponse(object):
             resp.drain_conn()
         decompress.assert_not_called()
         assert resp._decoder is None
-        assert fp.read() == b""
+        # The body was read to the end; read(amt) closes it at EOF.
+        assert fp.closed
 
     def test_chunk_size_line_too_long(self):
         # CVE-2026-97689: a malicious server can send a chunk-size line with
@@ -709,6 +711,40 @@ class TestResponse(object):
         # drain_conn() still discards everything without decoding.
         r.drain_conn()
         assert r._decoder is None
+
+    def test_gzip_trailing_garbage_does_not_raise_on_flush(self):
+        # Upstream 48113e7a: after an error in a later gzip member is
+        # swallowed, flush() must not raise it again (newer Pythons).
+        compress = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+        data = compress.compress(b"foo") + compress.flush() + b"garbage"
+        r = HTTPResponse(
+            BytesIO(data), headers={"content-encoding": "gzip"}, preload_content=False
+        )
+        assert r.read() == b"foo"
+        assert r._decoder.flush() == b""
+
+    @pytest.mark.timeout(10)
+    @pytest.mark.parametrize("chunked", [False, True])
+    def test_stream_amt_zero_returns(self, chunked):
+        if chunked:
+            httplib_r = httplib.HTTPResponse(MockSock)
+            httplib_r.fp = MockChunkedEncodingResponse([b"foo"])
+            r = HTTPResponse(
+                httplib_r,
+                preload_content=False,
+                headers={"transfer-encoding": "chunked"},
+            )
+            assert list(r.read_chunked(0)) == []
+        else:
+            r = HTTPResponse(BytesIO(b"foo"), preload_content=False)
+        assert list(r.stream(0)) == []
+
+    def test_drain_conn_reads_in_chunks(self):
+        r = HTTPResponse(BytesIO(b"x" * 200000), preload_content=False)
+        with mock.patch.object(r, "read", wraps=r.read) as read:
+            r.drain_conn()
+        assert read.call_args_list[0] == mock.call(65536, decode_content=False)
+        assert len(read.call_args_list) > 1
 
     def test_streaming(self):
         fp = BytesIO(b"foo")

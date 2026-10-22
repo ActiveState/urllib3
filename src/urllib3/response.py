@@ -45,6 +45,9 @@ log = logging.getLogger(__name__)
 # via an unterminated chunk-size line.
 _MAX_CHUNK_LINE_LENGTH = 2 ** 16
 
+# Read in 64 KiB chunks
+_READ_CHUNK_SIZE = 2 ** 16
+
 
 class DeflateDecoder(object):
     def __init__(self):
@@ -198,6 +201,11 @@ class GzipDecoder(object):
     @property
     def has_unconsumed_tail(self):
         return bool(self._unconsumed_tail)
+
+    def flush(self):
+        if self._state == GzipDecoderState.SWALLOW_DATA:
+            return b""
+        return self._obj.flush()
 
 
 if brotli is not None:
@@ -459,8 +467,9 @@ class HTTPResponse(io.IOBase):
             self._decoder = None
         try:
             # Discard the rest of the body without decoding it, even if
-            # decoding has already started.
-            self.read(decode_content=False)
+            # decoding has already started, 64 KiB at a time.
+            while self.read(_READ_CHUNK_SIZE, decode_content=False):
+                pass
         except (HTTPError, SocketError, BaseSSLError, HTTPException):
             pass
         if self._has_decoded_content:
@@ -810,7 +819,7 @@ class HTTPResponse(io.IOBase):
 
         return data
 
-    def stream(self, amt=2 ** 16, decode_content=None):
+    def stream(self, amt=_READ_CHUNK_SIZE, decode_content=None):
         """
         A generator wrapper for the read() method. A call will block until
         ``amt`` bytes have been read from the connection or until the
@@ -826,6 +835,9 @@ class HTTPResponse(io.IOBase):
             If True, will attempt to decode the body based on the
             'content-encoding' header.
         """
+        if amt == 0:
+            return
+
         if self.chunked and self.supports_chunked_reads():
             for line in self.read_chunked(amt, decode_content=decode_content):
                 yield line
@@ -1037,7 +1049,9 @@ class HTTPResponse(io.IOBase):
             if self._fp.fp is None:
                 return
 
-            if amt and amt < 0:
+            if amt == 0:
+                return
+            elif amt and amt < 0:
                 # Negative numbers and `None` should be treated the same,
                 # but httplib handles only `None` correctly.
                 amt = None

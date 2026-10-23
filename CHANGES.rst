@@ -1,6 +1,50 @@
 Changes
 =======
 
+1.26.20.post4 (2026-10-22)
+--------------------------
+
+The package version is ``1.26.20.post4``, while ``urllib3.__version__``
+is now ``"1.26.20"`` (it was ``"1.26.20.post3"`` in the previous release):
+requests unpacks ``urllib3.__version__`` as major.minor.patch and emits
+``RequestsDependencyWarning`` for anything longer. The User-Agent header
+is ``python-urllib3/1.26.20`` accordingly.
+
+* - Fixed a security issue where the streaming API (``read(amt)``,
+  ``stream()``, ``read_chunked()``) fully decompressed small amounts of
+  highly compressed data in one operation. Decoding is now bounded by the
+  requested amount and the rest is kept for later reads. Bounded Brotli
+  decoding needs Brotli >= 1.2.0; older Brotli or brotlipy decode without
+  a bound and emit a ``DependencyWarning``.
+  (CVE-2025-66471, GHSA-2xpw-w6gg-jr37)
+* - ``HTTPResponse.drain_conn()`` now discards the remaining body without
+  decoding it even after decoding has started, so draining a partially
+  read response cannot bypass the bound above.
+  (hardening from CVE-2026-44432, GHSA-mf9v-mfxr-j63j)
+* - The bounded Deflate decoder no longer loops forever on data after the
+  end of the stream. (port of the CVE-2026-97688 fix, GHSA-gh4c-6fx4-qh6g)
+* - ``read(amt)`` on a compressed response now returns at most about
+  ``amt`` decoded bytes; output still held by the decoder is returned by
+  later reads, and the decoder is flushed when the body ends, including
+  when ``stream()`` finishes on a response whose file object closes at
+  Content-Length. Calling ``read(decode_content=False)`` after a
+  successful decode, while decoded data is still pending, raises
+  ``RuntimeError`` instead of losing it; it is still allowed after a
+  failed decode.
+
+  To read a compressed body in pieces, use ``stream()`` (or
+  ``read_chunked()`` for chunked responses). ``closed`` can be True while
+  ``read(amt)`` still has decoded data to return: when the whole body
+  arrives at once, the file object reaches its end on the first read but
+  only ``amt`` bytes are handed out. A loop such as
+  ``while not r.closed: r.read(amt)`` can therefore stop early. Looping
+  on ``read(amt)`` until it returns ``b""`` was never reliable on this
+  line either, since ``read(amt)`` can return ``b""`` before the end of a
+  compressed body.
+* - ``stream(0)`` and ``read_chunked(0)`` return instead of looping, and
+  ``drain_conn()`` discards the body 64 KiB at a time.
+
+
 1.26.20.post3 (2026-10-22)
 --------------------------
 
@@ -23,7 +67,8 @@ Changes
   (CVE-2026-97687, GHSA-8988-9cw3-xx77)
 
 Known open: CVE-2025-66471 (GHSA-2xpw-w6gg-jr37, unbounded decompression in
-the streaming ``read(amt)``/``stream()`` API) is not fixed in this release.
+the streaming ``read(amt)``/``stream()`` API) is not fixed in this release;
+see 1.26.20.post4.
 
 Versioning: this release uses a PEP 440 post-release (``1.26.20.post3``)
 instead of the earlier ``1.26.20+security.N`` local-version label.

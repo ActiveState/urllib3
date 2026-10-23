@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import contextlib
+import random
 import re
 import socket
 import ssl
@@ -145,10 +146,10 @@ class TestResponse(object):
 
         assert r.read(3) == b""
         # Buffer in case we need to switch to the raw stream
-        assert r._decoder._data is not None
+        assert r._decoder._first_try_data
         assert r.read(1) == b"f"
         # Now that we've decoded data, we just stream through the decoder
-        assert r._decoder._data is None
+        assert r._decoder._first_try_data == b""
         assert r.read(2) == b"oo"
         assert r.read() == b""
         assert r.read() == b""
@@ -166,7 +167,7 @@ class TestResponse(object):
         assert r.read(1) == b""
         assert r.read(1) == b"f"
         # Once we've decoded data, we just stream to the decoder; no buffering
-        assert r._decoder._data is None
+        assert r._decoder._first_try_data == b""
         assert r.read(2) == b"oo"
         assert r.read() == b""
         assert r.read() == b""
@@ -473,9 +474,10 @@ class TestResponse(object):
         resp.drain_conn()
 
         gzip_decompress.assert_not_called()
-        assert fp.read() == b""
+        # The body was read to the end; read(amt) closes it at EOF.
+        assert fp.closed
 
-    def test_drain_conn_continues_decoding_once_started(self):
+    def test_drain_conn_does_not_decode_after_partial_read(self):
         compress = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
         data = compress.compress(b"foo" * 1024)
         data += compress.flush()
@@ -491,8 +493,10 @@ class TestResponse(object):
             resp._decoder, "decompress", wraps=resp._decoder.decompress
         ) as decompress:
             resp.drain_conn()
-        decompress.assert_called()
-        assert fp.read() == b""
+        decompress.assert_not_called()
+        assert resp._decoder is None
+        # The body was read to the end; read(amt) closes it at EOF.
+        assert fp.closed
 
     def test_chunk_size_line_too_long(self):
         # CVE-2026-97689: a malicious server can send a chunk-size line with
@@ -548,6 +552,259 @@ class TestResponse(object):
         assert fp.closed
         assert r.isclosed()
         assert resp.closed
+
+    @pytest.mark.parametrize("read_method", ["read", "stream", "read_chunked"])
+    @pytest.mark.parametrize(
+        "encoding", ["deflate", "deflate-raw", "gzip", "gzip-multi", "br"]
+    )
+    def test_decompression_bomb_is_read_in_bounded_pieces(self, encoding, read_method):
+        # CVE-2025-66471: a small amount of highly compressed data must not
+        # be fully decoded by one bounded read.
+        total = 16 * 1024 * 1024
+        payload = b"\0" * total
+        if encoding == "deflate":
+            name, compressed = "deflate", zlib.compress(payload)
+        elif encoding == "deflate-raw":
+            compress = zlib.compressobj(6, zlib.DEFLATED, -zlib.MAX_WBITS)
+            name = "deflate"
+            compressed = compress.compress(payload) + compress.flush()
+        elif encoding in ("gzip", "gzip-multi"):
+            members = 2 if encoding == "gzip-multi" else 1
+            name, compressed = "gzip", b""
+            for _ in range(members):
+                compress = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+                part = payload[: total // members]
+                compressed += compress.compress(part) + compress.flush()
+        else:
+            if brotli is None or not hasattr(brotli.Decompressor(), "can_accept_more_data"):
+                pytest.skip("Brotli >= 1.2.0 is not available")
+            name, compressed = "br", brotli.compress(payload)
+        assert len(compressed) < total // 100
+
+        amt = 64 * 1024
+        # Brotli rounds its output limit up to its internal buffer size.
+        bound = amt if name != "br" else 4 * amt
+
+        if read_method in ("read_chunked", "stream"):
+            httplib_r = httplib.HTTPResponse(MockSock)
+            httplib_r.fp = MockChunkedEncodingResponse([compressed])
+            r = HTTPResponse(
+                httplib_r,
+                preload_content=False,
+                headers={"transfer-encoding": "chunked", "content-encoding": name},
+            )
+            pieces = getattr(r, read_method)(amt=amt, decode_content=True)
+        else:
+            r = HTTPResponse(
+                BytesIO(compressed),
+                headers={"content-encoding": name},
+                preload_content=False,
+            )
+
+            def read_all():
+                while True:
+                    piece = r.read(amt=amt, decode_content=True)
+                    if not piece:
+                        return
+                    yield piece
+
+            pieces = read_all()
+
+        received = 0
+        for piece in pieces:
+            assert len(piece) <= bound
+            assert piece == b"\0" * len(piece)
+            received += len(piece)
+        assert received == total
+
+    @pytest.mark.parametrize("encoding", ["deflate", "deflate-raw", "gzip"])
+    @pytest.mark.parametrize("amt", [1, 7, 64, 1024])
+    def test_bounded_reads_return_the_whole_body(self, encoding, amt):
+        # A bounded read can stop with all input fed to the decoder and
+        # output still pending in it; that output must not be lost at EOF.
+        rnd = random.Random(amt)
+        for _ in range(25):
+            payload = (
+                b"".join(six.int2byte(rnd.randint(0, 255)) for _ in range(rnd.randint(0, 300)))
+                + b"a" * rnd.randint(0, 3000)
+            )
+            if encoding == "deflate":
+                name, compressed = "deflate", zlib.compress(payload)
+            else:
+                wbits = -zlib.MAX_WBITS if encoding == "deflate-raw" else 16 + zlib.MAX_WBITS
+                compress = zlib.compressobj(6, zlib.DEFLATED, wbits)
+                compressed = compress.compress(payload) + compress.flush()
+                name = "deflate" if encoding == "deflate-raw" else "gzip"
+
+            def make():
+                return HTTPResponse(
+                    BytesIO(compressed),
+                    headers={"content-encoding": name},
+                    preload_content=False,
+                )
+
+            assert b"".join(make().stream(amt)) == payload
+
+            r = make()
+            pieces = []
+            while True:
+                piece = r.read(amt)
+                if not piece and r.isclosed() and not r._decoder.has_unconsumed_tail:
+                    break
+                pieces.append(piece)
+            assert b"".join(pieces) == payload
+
+            r = make()
+            assert r.read(amt) + r.read() == payload
+
+            r = make()
+            first = r.read(amt)
+            assert first + r.data == payload
+
+    # Before the fix the read loop spins inside stream()/read_chunked()
+    # without yielding, so only a timeout can turn a regression into a failure.
+    @pytest.mark.timeout(10)
+    @pytest.mark.parametrize("read_method", ["stream", "read_chunked"])
+    @pytest.mark.parametrize("raw", [False, True])
+    def test_deflate_with_trailing_data_terminates(self, read_method, raw):
+        # CVE-2026-97688 (GHSA-gh4c-6fx4-qh6g): bytes after the end of a
+        # Deflate stream must not keep the decoder reporting pending input.
+        payload = b"A" * 100
+        if raw:
+            compress = zlib.compressobj(6, zlib.DEFLATED, -zlib.MAX_WBITS)
+            compressed = compress.compress(payload) + compress.flush()
+        else:
+            compressed = zlib.compress(payload)
+        compressed += b"tail"
+
+        if read_method == "read_chunked":
+            httplib_r = httplib.HTTPResponse(MockSock)
+            httplib_r.fp = MockChunkedEncodingResponse([compressed])
+            r = HTTPResponse(
+                httplib_r,
+                preload_content=False,
+                headers={"transfer-encoding": "chunked", "content-encoding": "deflate"},
+            )
+        else:
+            r = HTTPResponse(
+                BytesIO(compressed),
+                headers={"content-encoding": "deflate"},
+                preload_content=False,
+            )
+
+        pieces = list(getattr(r, read_method)(50, decode_content=True))
+        assert b"".join(pieces) == payload
+
+    def test_raw_read_while_decoded_data_is_pending_is_refused(self):
+        compress = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+        data = compress.compress(b"z" * 2000000) + compress.flush()
+        r = HTTPResponse(
+            BytesIO(data), headers={"content-encoding": "gzip"}, preload_content=False
+        )
+        assert r.read(1024, decode_content=True) == b"z" * 1024
+        assert r._decoder.has_unconsumed_tail
+        with pytest.raises(RuntimeError, match="still being decoded"):
+            r.read(decode_content=False)
+        # Nothing was lost: decoding can carry on.
+        assert len(r.read(1024, decode_content=True)) == 1024
+
+        # drain_conn() still discards everything without decoding.
+        r.drain_conn()
+        assert r._decoder is None
+
+    def test_gzip_trailing_garbage_does_not_raise_on_flush(self):
+        # Upstream 48113e7a: after an error in a later gzip member is
+        # swallowed, flush() must not raise it again (newer Pythons).
+        compress = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+        data = compress.compress(b"foo") + compress.flush() + b"garbage"
+        r = HTTPResponse(
+            BytesIO(data), headers={"content-encoding": "gzip"}, preload_content=False
+        )
+        assert r.read() == b"foo"
+        assert r._decoder.flush() == b""
+
+    @pytest.mark.timeout(10)
+    @pytest.mark.parametrize("chunked", [False, True])
+    def test_stream_amt_zero_returns(self, chunked):
+        if chunked:
+            httplib_r = httplib.HTTPResponse(MockSock)
+            httplib_r.fp = MockChunkedEncodingResponse([b"foo"])
+            r = HTTPResponse(
+                httplib_r,
+                preload_content=False,
+                headers={"transfer-encoding": "chunked"},
+            )
+            assert list(r.read_chunked(0)) == []
+        else:
+            r = HTTPResponse(BytesIO(b"foo"), preload_content=False)
+        assert list(r.stream(0)) == []
+
+    def test_drain_conn_reads_in_chunks(self):
+        r = HTTPResponse(BytesIO(b"x" * 200000), preload_content=False)
+        with mock.patch.object(r, "read", wraps=r.read) as read:
+            r.drain_conn()
+        assert read.call_args_list[0] == mock.call(65536, decode_content=False)
+        assert len(read.call_args_list) > 1
+
+    @pytest.mark.parametrize("encoding", ["deflate", "deflate-raw", "gzip"])
+    @pytest.mark.parametrize("amt", [1, 7, 1024])
+    def test_stream_flushes_decoder_when_fp_closes_at_content_length(
+        self, encoding, amt
+    ):
+        # httplib closes the fp as soon as Content-Length is reached, which
+        # can end stream()'s loop while zlib still holds output (raw deflate
+        # has no trailer to read).
+        rnd = random.Random(amt)
+        payloads = [b"\0" * 65537] + [
+            b"".join(six.int2byte(rnd.randint(0, 255)) for _ in range(rnd.randint(0, 300)))
+            + b"a" * rnd.randint(0, 5000)
+            for _ in range(20)
+        ]
+        for payload in payloads:
+            if encoding == "deflate":
+                name, body = "deflate", zlib.compress(payload)
+            else:
+                wbits = -zlib.MAX_WBITS if encoding == "deflate-raw" else 16 + zlib.MAX_WBITS
+                compress = zlib.compressobj(6, zlib.DEFLATED, wbits)
+                body = compress.compress(payload) + compress.flush()
+                name = "deflate" if encoding == "deflate-raw" else "gzip"
+            r = _httplib_response(body, {"Content-Encoding": name})
+            assert b"".join(r.stream(amt)) == payload
+
+    def test_raw_read_after_failed_decode_is_allowed(self):
+        # requests falls back to raw.read(decode_content=False) when a
+        # redirect body cannot be decoded; that must not raise.
+        body = b"<html>not deflate</html>" * 10
+        r = _httplib_response(body, {"Content-Encoding": "deflate"})
+        with pytest.raises(DecodeError):
+            r.read(16)
+        r.read(decode_content=False)
+
+        r = _httplib_response(body, {"Content-Encoding": "deflate"})
+        with pytest.raises(DecodeError):
+            r.read(16)
+        r.drain_conn()
+
+    def test_raw_read_after_mid_stream_decode_failure_is_allowed(self):
+        compress = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+        data = compress.compress(b"z" * 2000000) + compress.flush()
+        r = HTTPResponse(
+            BytesIO(data), headers={"content-encoding": "gzip"}, preload_content=False
+        )
+        assert len(r.read(1024)) == 1024
+        with mock.patch.object(r._decoder, "decompress", side_effect=zlib.error):
+            with pytest.raises(DecodeError):
+                r.read(1024)
+        r.read(decode_content=False)
+
+    def test_broken_brotli_decoder_reports_no_tail(self):
+        if brotli is None or not hasattr(brotli.Decompressor(), "can_accept_more_data"):
+            pytest.skip("Brotli >= 1.2.0 is not available")
+        r = _httplib_response(b"definitely not brotli" * 10, {"Content-Encoding": "br"})
+        with pytest.raises(DecodeError):
+            r.read(16)
+        assert r._decoder.has_unconsumed_tail is False
+        r.drain_conn()
 
     def test_streaming(self):
         fp = BytesIO(b"foo")
@@ -1065,6 +1322,26 @@ class TestResponse(object):
             with pytest.raises(SSLError) as e:
                 resp.read()
             assert e.value.args[0] == mac_error
+
+
+class _MakefileSock(object):
+    def __init__(self, raw):
+        self.raw = raw
+
+    def makefile(self, *args, **kwargs):
+        return BytesIO(self.raw)
+
+
+def _httplib_response(body, headers):
+    """
+    A urllib3 HTTPResponse over a real httplib response with Content-Length,
+    whose fp httplib closes as soon as the body has been read.
+    """
+    head = "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n" % len(body)
+    head += "".join("%s: %s\r\n" % item for item in headers.items()) + "\r\n"
+    r = httplib.HTTPResponse(_MakefileSock(head.encode("latin-1") + body))
+    r.begin()
+    return HTTPResponse.from_httplib(r, preload_content=False)
 
 
 class MockChunkedEncodingResponse(object):

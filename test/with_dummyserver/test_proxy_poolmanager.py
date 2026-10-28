@@ -738,9 +738,15 @@ class TestHTTPProxyManager(HTTPDummyProxyTestCase):
     @pytest.mark.parametrize(
         ["proxy_scheme", "use_forwarding_for_https"],
         [
+            # No ("https", True) case: when forwarding, the client never makes
+            # a TLS connection to the target, so the target's ssl_context
+            # cannot cause a TLS error.  The error this case expected came
+            # from applying the target's TLS settings to the proxy
+            # connection, which is CVE-2026-97687 (fixed in 1.26.20.post3).
+            # Upstream skipped this case as urllib3/urllib3#2577 and removed
+            # it with the fix in 2.8.0.
             ("http", False),
             ("https", False),
-            ("https", True),
         ],
     )
     def test_proxy_https_target_tls_error(self, proxy_scheme, use_forwarding_for_https):

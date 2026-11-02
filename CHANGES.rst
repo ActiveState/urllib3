@@ -1,10 +1,36 @@
-2.6.3.2 (2026-11-02)
-====================
+2.6.3.post4 (ActiveState)
+=========================
+
+ActiveState security release for the Python 3.7 line (branch
+``python37-compat``). It carries the fixes of the Python 3.9 line's
+2.6.3.post2 and 2.6.3.post3 releases, plus a Python 3.7 connection fix. The
+package version is ``2.6.3.post4``; ``urllib3.__version__`` stays ``"2.6.3"``
+so that ``requests`` does not emit ``RequestsDependencyWarning``.
 
 - Fixed every connection failing on Python 3.7 with
   ``AttributeError: module 'sys' has no attribute 'audit'``.
   ``HTTPConnection._new_conn()`` now raises the ``http.client.connect`` audit
   event only when ``sys.audit()`` exists (Python 3.8 and later).
+- Fixed a high-severity security issue (CVE-2026-44432) where decompression-bomb
+  safeguards of the streaming API were bypassed:
+
+  1. When ``HTTPResponse.drain_conn()`` was called after the response had
+     been read and decompressed partially.
+  2. During the second ``HTTPResponse.read(amt=N)`` or
+     ``HTTPResponse.stream(amt=N)`` call when the response was decompressed
+     using the official `Brotli <https://pypi.org/project/brotli/>`__ library.
+
+  (`GHSA-mf9v-mfxr-j63j <https://github.com/urllib3/urllib3/security/advisories/GHSA-mf9v-mfxr-j63j>`__)
+- Fixed a high-severity security issue (CVE-2026-44431) where HTTP pools
+  created using ``ProxyManager.connection_from_url`` did not strip sensitive
+  headers specified in ``Retry.remove_headers_on_redirect`` when redirecting
+  to a different host.
+  (`GHSA-qccp-gfcp-xxvc <https://github.com/urllib3/urllib3/security/advisories/GHSA-qccp-gfcp-xxvc>`__)
+- Fixed silent truncation of compressed response bodies read in pieces. A
+  bounded read could reach the end of the body while the decoder still held
+  output, and that output was dropped by ``HTTPResponse.stream()``,
+  ``read(amt)`` loops and readers built on ``readinto()``. The decoder is now
+  flushed when the body ends.
 
 
 2.6.3 (2026-01-07)

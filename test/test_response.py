@@ -1306,7 +1306,10 @@ class TestResponse:
                 out = sink.getvalue()
             else:
                 pieces = []
-                while piece := getattr(r, read_method)(amt):
+                while True:
+                    piece = getattr(r, read_method)(amt)
+                    if not piece:
+                        break
                     assert len(piece) <= amt
                     pieces.append(piece)
                 out = b"".join(pieces)

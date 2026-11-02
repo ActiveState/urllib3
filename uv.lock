@@ -2372,7 +2372,7 @@ wheels = [
 
 [[package]]
 name = "urllib3"
-version = "2.6.3.post2"
+version = "2.6.3.post3"
 source = { editable = "." }
 
 [package.optional-dependencies]

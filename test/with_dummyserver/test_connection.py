@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import contextlib
+import sys
+import types
 import typing
 from http.client import ResponseNotReady
 from unittest import mock
 
 import pytest
 
+import urllib3.connection
 from dummyserver.testcase import HypercornDummyServerTestCase as server
 from urllib3 import HTTPConnectionPool
 from urllib3.response import HTTPResponse
@@ -29,6 +32,9 @@ def test_returns_urllib3_HTTPResponse(pool: HTTPConnectionPool) -> None:
         assert isinstance(response, HTTPResponse)
 
 
+@pytest.mark.skipif(
+    not hasattr(sys, "audit"), reason="sys.audit() is new in Python 3.8"
+)
 @mock.patch("urllib3.connection.sys.audit")
 def test_audit_event(audit_mock: mock.Mock, pool: HTTPConnectionPool) -> None:
     with contextlib.closing(pool._get_conn()) as conn:
@@ -41,6 +47,21 @@ def test_audit_event(audit_mock: mock.Mock, pool: HTTPConnectionPool) -> None:
             if call.args[0] == "http.client.connect"
         ]
         assert len(connect_events) == 1
+
+
+def test_connect_without_sys_audit(
+    pool: HTTPConnectionPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Python 3.7 has no sys.audit(); connecting must not depend on it.  Hide it
+    # from urllib3.connection only: on 3.8+ http.client itself still calls it.
+    sys_without_audit = types.SimpleNamespace(
+        **{name: getattr(sys, name) for name in dir(sys) if name != "audit"}
+    )
+    monkeypatch.setattr(urllib3.connection, "sys", sys_without_audit)
+    with contextlib.closing(pool._get_conn()) as conn:
+        conn.request("GET", "/")
+        response = conn.getresponse()
+        assert response.status == 200
 
 
 def test_does_not_release_conn(pool: HTTPConnectionPool) -> None:

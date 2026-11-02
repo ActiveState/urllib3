@@ -1,3 +1,12 @@
+2.6.3.2 (2026-11-02)
+====================
+
+- Fixed every connection failing on Python 3.7 with
+  ``AttributeError: module 'sys' has no attribute 'audit'``.
+  ``HTTPConnection._new_conn()`` now raises the ``http.client.connect`` audit
+  event only when ``sys.audit()`` exists (Python 3.8 and later).
+
+
 2.6.3 (2026-01-07)
 ==================
 

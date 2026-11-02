@@ -220,7 +220,9 @@ class HTTPConnection(_HTTPConnection):
                 self, f"Failed to establish a new connection: {e}"
             ) from e
 
-        sys.audit("http.client.connect", self, self.host, self.port)
+        # sys.audit() is new in Python 3.8; this build also supports 3.7.
+        if hasattr(sys, "audit"):
+            sys.audit("http.client.connect", self, self.host, self.port)
 
         return sock
 

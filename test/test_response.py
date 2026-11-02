@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import gzip
 import http.client as httplib
+import shutil
 import socket
 import ssl
 import sys
@@ -201,6 +202,34 @@ def sock() -> typing.Generator[socket.socket]:
     s = socket.socket()
     yield s
     s.close()
+
+
+class _MakefileSock:
+    def __init__(self, raw: bytes) -> None:
+        self.raw = raw
+
+    def makefile(self, *args: typing.Any, **kwargs: typing.Any) -> BytesIO:
+        return BytesIO(self.raw)
+
+
+def _content_length_response(body: bytes, content_encoding: str) -> HTTPResponse:
+    """
+    An HTTPResponse over a real http.client response with Content-Length,
+    whose fp http.client closes as soon as the body has been read.
+    """
+    head = (
+        "HTTP/1.1 200 OK\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        f"Content-Encoding: {content_encoding}\r\n\r\n"
+    ).encode("latin-1")
+    r = httplib.HTTPResponse(_MakefileSock(head + body))  # type: ignore[arg-type]
+    r.begin()
+    return HTTPResponse(
+        body=r,
+        headers={"content-encoding": content_encoding, "content-length": str(len(body))},
+        preload_content=False,
+        original_response=r,
+    )
 
 
 class TestResponse:
@@ -814,22 +843,33 @@ class TestResponse:
             pytest.skip(f"Proper {request.node.callspec.id} decoder is not available")
 
         name, compressed_data = data
-        limit = 1024 * 1024  # 1 MiB
+        limit1 = 1024 * 1024  # 1 MiB
+        # We test with two read calls because the second call may be
+        # able to use the internal buffer filled by the first call, and
+        # we want to ensure that full decompression is never triggered
+        # by the second call. The limit for the second call is lowered
+        # to make sure that the internal buffer is used for the Brotli
+        # case specifically https://github.com/google/brotli/issues/1396
+        limit2 = 1024  # 1 KiB
         if read_method in ("read_chunked", "stream"):
             httplib_r = httplib.HTTPResponse(MockSock)  # type: ignore[arg-type]
+            httplib_r.chunked = True
+            httplib_r.chunk_left = 1
             httplib_r.fp = MockChunkedEncodingResponse([compressed_data])  # type: ignore[assignment]
             r = HTTPResponse(
                 httplib_r,
                 preload_content=False,
                 headers={"transfer-encoding": "chunked", "content-encoding": name},
             )
-            next(getattr(r, read_method)(amt=limit, decode_content=True))
+            for limit in (limit1, limit2):
+                next(getattr(r, read_method)(amt=limit, decode_content=True))
         else:
             fp = BytesIO(compressed_data)
             r = HTTPResponse(
                 fp, headers={"content-encoding": name}, preload_content=False
             )
-            getattr(r, read_method)(amt=limit, decode_content=True)
+            for limit in (limit1, limit2):
+                getattr(r, read_method)(amt=limit, decode_content=True)
 
         # Check that the internal decoded buffer is empty unless brotli
         # is used.
@@ -838,6 +878,13 @@ class TestResponse:
         # And unmaintained brotlipy cannot limit the output buffer size.
         if name != "br" or brotli.__name__ == "brotlicffi":
             assert len(r._decoded_buffer) == 0
+
+        # Check that memory usage is still within the limit while the
+        # connection is being drained, meaning that the call does not
+        # decompress the whole content.
+        r.drain_conn()
+        assert r._decoder is None
+        assert len(r._decoded_buffer) == 0
 
     def test_multi_decoding_deflate_deflate(self) -> None:
         data = zlib.compress(zlib.compress(b"foo"))
@@ -1225,6 +1272,48 @@ class TestResponse:
         )
         assert resp.read(2, decode_content=False) is not None
         assert resp.read(1, decode_content=True) == b"f"
+
+    @pytest.mark.parametrize(
+        "read_method", ["stream", "read", "read1", "copyfileobj"]
+    )
+    @pytest.mark.parametrize("encoding", ["deflate", "deflate-raw", "gzip"])
+    @pytest.mark.parametrize("amt", [1, 7, 1024])
+    def test_bounded_reads_flush_decoder_when_fp_closes_at_content_length(
+        self, read_method: str, encoding: str, amt: int
+    ) -> None:
+        # A bounded decode can stop with all input fed to zlib and output
+        # still held inside it. http.client closes the fp as soon as
+        # Content-Length is reached, and raw deflate has no trailer whose read
+        # would flush that output, so it must be flushed explicitly.
+        payloads = [b"\0" * 65537] + [
+            bytes(range(256)) * n + b"a" * (n * 997) for n in range(1, 8)
+        ]
+        for payload in payloads:
+            if encoding == "deflate":
+                name, body = "deflate", zlib.compress(payload)
+            else:
+                wbits = -zlib.MAX_WBITS if encoding == "deflate-raw" else 16 + zlib.MAX_WBITS
+                compress = zlib.compressobj(6, zlib.DEFLATED, wbits)
+                body = compress.compress(payload) + compress.flush()
+                name = "deflate" if encoding == "deflate-raw" else "gzip"
+            r = _content_length_response(body, name)
+
+            if read_method == "stream":
+                out = b"".join(r.stream(amt))
+            elif read_method == "copyfileobj":
+                sink = BytesIO()
+                shutil.copyfileobj(r, sink, amt)  # type: ignore[misc]
+                out = sink.getvalue()
+            else:
+                pieces = []
+                while True:
+                    piece = getattr(r, read_method)(amt)
+                    if not piece:
+                        break
+                    assert len(piece) <= amt
+                    pieces.append(piece)
+                out = b"".join(pieces)
+            assert out == payload
 
     def test_streaming(self) -> None:
         fp = BytesIO(b"foo")
@@ -1941,8 +2030,8 @@ class MockChunkedEncodingResponse:
                 self.cur_chunk = self.cur_chunk[amt:]
             return chunk_part
 
-    def readline(self) -> bytes:
-        return self.pop_current_chunk(till_crlf=True)
+    def readline(self, amt: int = -1) -> bytes:
+        return self.pop_current_chunk(amt, till_crlf=amt < 0)
 
     def read(self, amt: int = -1) -> bytes:
         return self.pop_current_chunk(amt)

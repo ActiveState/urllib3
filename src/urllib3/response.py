@@ -798,13 +798,14 @@ class HTTPResponse(BaseHTTPResponse):
         Unread data in the HTTPResponse connection blocks the connection from being released back to the pool.
         """
         try:
-            self.read(
-                # Do not spend resources decoding the content unless
-                # decoding has already been initiated.
-                decode_content=self._has_decoded_content,
-            )
+            self._raw_read()
         except (HTTPError, OSError, BaseSSLError, HTTPException):
             pass
+        if self._has_decoded_content:
+            # `_raw_read` skips decompression, so we should clean up the
+            # decoder to avoid keeping unnecessary data in memory.
+            self._decoded_buffer = BytesQueueBuffer()
+            self._decoder = None
 
     @property
     def data(self) -> bytes:
@@ -1099,7 +1100,11 @@ class HTTPResponse(BaseHTTPResponse):
         elif amt is not None:
             cache_content = False
 
-            if self._decoder and self._decoder.has_unconsumed_tail:
+            if (
+                self._decoder
+                and self._decoder.has_unconsumed_tail
+                and len(self._decoded_buffer) < amt
+            ):
                 decoded_data = self._decode(
                     b"",
                     decode_content,
@@ -1119,6 +1124,19 @@ class HTTPResponse(BaseHTTPResponse):
             and len(self._decoded_buffer) == 0
             and not (self._decoder and self._decoder.has_unconsumed_tail)
         ):
+            if flush_decoder and decode_content and self._decoder:
+                # The connection is exhausted, but a bounded decode can stop
+                # with all input fed to the decoder and output still held
+                # inside it (raw deflate has no trailer whose read would
+                # flush it). No tail is pending here, so only that small
+                # remainder comes out.
+                self._decoded_buffer.put(
+                    self._decode(b"", decode_content, flush_decoder=True)
+                )
+                if len(self._decoded_buffer) > 0:
+                    if amt is None:
+                        return self._decoded_buffer.get_all()
+                    return self._decoded_buffer.get(amt)
             return data
 
         if amt is None:
@@ -1257,6 +1275,17 @@ class HTTPResponse(BaseHTTPResponse):
             ):
                 data = self.read(amt=amt, decode_content=decode_content)
 
+                if data:
+                    yield data
+
+            # httplib closes the file as soon as Content-Length is reached,
+            # which can end the loop above while the decoder still holds
+            # output from input it has already consumed. Flush it; the file
+            # is done, so read() is not called again.
+            if decode_content is None:
+                decode_content = self.decode_content
+            if decode_content and self._decoder:
+                data = self._decode(b"", decode_content, flush_decoder=True)
                 if data:
                     yield data
 

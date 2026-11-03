@@ -579,6 +579,9 @@ class ProxyManager(PoolManager):
         if proxy.scheme not in ("http", "https"):
             raise ProxySchemeUnknown(proxy.scheme)
 
+        # Keep the deprecated ssl_context fallback on the manager for
+        # compatibility, while passing only explicit proxy policy to connections.
+        self.proxy_ssl_context = proxy_ssl_context
         if (
             use_forwarding_for_https
             and proxy.scheme == "https"
@@ -591,8 +594,8 @@ class ProxyManager(PoolManager):
                 FutureWarning,
                 stacklevel=2,
             )
-            if proxy_ssl_context is None:
-                proxy_ssl_context = connection_pool_kw.get("ssl_context")
+            if self.proxy_ssl_context is None:
+                self.proxy_ssl_context = connection_pool_kw.get("ssl_context")
 
         if not proxy.port:
             port = port_by_scheme.get(proxy.scheme, 80)
@@ -600,7 +603,6 @@ class ProxyManager(PoolManager):
 
         self.proxy = proxy
         self.proxy_headers = proxy_headers or {}
-        self.proxy_ssl_context = proxy_ssl_context
         self.proxy_config = ProxyConfig(
             proxy_ssl_context,
             use_forwarding_for_https,

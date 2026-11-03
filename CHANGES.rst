@@ -1,3 +1,34 @@
+2.6.3.post6 (ActiveState)
+=========================
+
+ActiveState security release for the Python 3.7 line (branch
+``python37-compat``). It backports the security fixes from urllib3 2.8.0.
+The package version is ``2.6.3.post6``; ``urllib3.__version__`` stays
+``"2.6.3"``. There are no 2.6.3.post5 releases of this line; that number
+is the Python 3.9 line's release with the same fixes.
+
+- Fixed a high-severity security issue (CVE-2026-97687,
+  `GHSA-8988-9cw3-xx77 <https://github.com/urllib3/urllib3/security/advisories/GHSA-8988-9cw3-xx77>`__)
+  where the TLS connection to an HTTPS proxy used the target server's TLS
+  settings. ``proxy_ssl_context`` was ignored with
+  ``use_forwarding_for_https=True``, and the target's ``cert_reqs``, CA
+  settings, SNI, hostname/fingerprint assertions and client certificate were
+  applied to the proxy handshake. ``cert_reqs="CERT_NONE"`` for the target
+  could also disable verification on the proxy's ``ssl_context`` in place.
+  The proxy handshake now uses only the proxy's TLS policy. Passing only
+  ``ssl_context`` to a forwarding HTTPS proxy still works as a fallback but
+  now emits a ``FutureWarning``. (Backports of upstream #3786 and #5093.)
+- Fixed a moderate-severity security issue (CVE-2026-97688,
+  `GHSA-gh4c-6fx4-qh6g <https://github.com/urllib3/urllib3/security/advisories/GHSA-gh4c-6fx4-qh6g>`__)
+  where decoding a chunked Deflate response with data after the end of the
+  Deflate stream could loop forever.
+- Fixed a high-severity security issue (CVE-2026-97689,
+  `GHSA-vxq7-64xx-v4gw <https://github.com/urllib3/urllib3/security/advisories/GHSA-vxq7-64xx-v4gw>`__)
+  where ``HTTPResponse.stream()`` and ``read_chunked()`` buffered an unbounded
+  chunk-size line into memory. The line is now capped at 65536 bytes and
+  ``ProtocolError`` is raised beyond that.
+
+
 2.6.3.post4 (ActiveState)
 =========================
 

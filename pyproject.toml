@@ -42,7 +42,7 @@ dependencies = [
   "typing_extensions>=3.7.4; python_version<'3.8'",
   "importlib_metadata>=1.0; python_version<'3.8'",
 ]
-version = "2.6.3.post4"
+version = "2.6.3.post6"
 
 [project.optional-dependencies]
 brotli = [
